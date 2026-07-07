@@ -1,16 +1,38 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
-import { User, Session } from '@supabase/supabase-js';
-import { supabase } from '../lib/supabase';
-import type { Profile, UserRole, Doctor, Patient } from '../lib/supabase';
+import { authApi, tokenManager } from '../lib/api';
+
+// Types matching the original for compatibility
+export type UserRole = 'admin' | 'doctor' | 'receptionist' | 'patient';
+
+export interface Profile {
+  id: string;
+  email: string;
+  full_name: string;
+  phone: string | null;
+  avatar_url: string | null;
+  role: UserRole;
+  date_of_birth: string | null;
+  gender: string | null;
+  address: string | null;
+  city: string | null;
+  state: string | null;
+  country: string;
+  pincode: string | null;
+  language: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
 
 interface AuthState {
-  user: User | null;
+  user: any | null;
   profile: Profile | null;
-  doctorProfile: Doctor | null;
-  patientProfile: Patient | null;
-  session: Session | null;
+  doctorProfile: any | null;
+  patientProfile: any | null;
+  session: any | null;
   loading: boolean;
   error: string | null;
+  isAuthenticated: boolean;
 }
 
 interface AuthContextType extends AuthState {
@@ -23,6 +45,29 @@ interface AuthContextType extends AuthState {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+// Convert API user to Profile type
+function mapUserToProfile(user: any): Profile {
+  return {
+    id: user.id || user._id,
+    email: user.email,
+    full_name: user.fullName,
+    phone: user.phone || null,
+    avatar_url: user.avatarUrl || null,
+    role: user.role,
+    date_of_birth: user.dateOfBirth || null,
+    gender: user.gender || null,
+    address: user.address?.street || null,
+    city: user.address?.city || null,
+    state: user.address?.state || null,
+    country: user.address?.country || 'India',
+    pincode: user.address?.pincode || null,
+    language: user.language || 'en',
+    is_active: user.isActive ?? true,
+    created_at: user.createdAt || new Date().toISOString(),
+    updated_at: user.updatedAt || new Date().toISOString(),
+  };
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AuthState>({
     user: null,
@@ -32,113 +77,130 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     session: null,
     loading: true,
     error: null,
+    isAuthenticated: false,
   });
 
+  // Initialize auth state from stored tokens
   useEffect(() => {
     let mounted = true;
 
     const initializeAuth = async () => {
       try {
-        const { data: { session }, error } = await supabase.auth.getSession();
-        if (error) throw error;
+        const token = tokenManager.getToken();
+        const storedUser = tokenManager.getUser();
 
-        if (mounted && session?.user) {
-          await fetchUserProfile(session.user.id, session);
-        } else if (mounted) {
-          setState(prev => ({ ...prev, loading: false }));
+        if (!token || !storedUser) {
+          if (mounted) {
+            setState(prev => ({
+              ...prev,
+              loading: false,
+              isAuthenticated: false,
+            }));
+          }
+          return;
+        }
+
+        // Verify token with backend
+        const result = await authApi.verifyToken();
+
+        if (mounted) {
+          if (result.success && result.data?.user) {
+            const profile = mapUserToProfile(result.data.user);
+            setState({
+              user: result.data.user,
+              profile,
+              doctorProfile: null,
+              patientProfile: null,
+              session: { access_token: token },
+              loading: false,
+              error: null,
+              isAuthenticated: true,
+            });
+          } else {
+            // Token invalid, try refresh
+            const refreshResult = await authApi.refreshToken();
+            if (refreshResult.success && refreshResult.data) {
+              const profile = mapUserToProfile(storedUser);
+              setState({
+                user: storedUser,
+                profile,
+                doctorProfile: null,
+                patientProfile: null,
+                session: { access_token: refreshResult.data.token },
+                loading: false,
+                error: null,
+                isAuthenticated: true,
+              });
+            } else {
+              // Refresh failed, clear tokens
+              tokenManager.clearAll();
+              setState({
+                user: null,
+                profile: null,
+                doctorProfile: null,
+                patientProfile: null,
+                session: null,
+                loading: false,
+                error: null,
+                isAuthenticated: false,
+              });
+            }
+          }
         }
       } catch (error) {
+        console.error('Auth initialization error:', error);
         if (mounted) {
-          setState(prev => ({
-            ...prev,
+          tokenManager.clearAll();
+          setState({
+            user: null,
+            profile: null,
+            doctorProfile: null,
+            patientProfile: null,
+            session: null,
             loading: false,
-            error: error instanceof Error ? error.message : 'Authentication error',
-          }));
+            error: null,
+            isAuthenticated: false,
+          });
         }
       }
     };
 
     initializeAuth();
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      if (!mounted) return;
-
-      if (event === 'SIGNED_IN' && session?.user) {
-        await fetchUserProfile(session.user.id, session);
-      } else if (event === 'SIGNED_OUT') {
-        setState({
-          user: null,
-          profile: null,
-          doctorProfile: null,
-          patientProfile: null,
-          session: null,
-          loading: false,
-          error: null,
-        });
-      }
-    });
-
     return () => {
       mounted = false;
-      subscription.unsubscribe();
     };
   }, []);
-
-  const fetchUserProfile = async (userId: string, session: Session | null) => {
-    try {
-      const { data: profile, error } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('id', userId)
-        .maybeSingle();
-
-      if (error) throw error;
-
-      let doctorProfile = null;
-      let patientProfile = null;
-
-      if (profile?.role === 'doctor') {
-        const { data: doctor } = await supabase
-          .from('doctors')
-          .select('*')
-          .eq('profile_id', userId)
-          .maybeSingle();
-        doctorProfile = doctor;
-      } else if (profile?.role === 'patient') {
-        const { data: patient } = await supabase
-          .from('patients')
-          .select('*')
-          .eq('profile_id', userId)
-          .maybeSingle();
-        patientProfile = patient;
-      }
-
-      setState({
-        user: session?.user ?? null,
-        profile,
-        doctorProfile,
-        patientProfile,
-        session,
-        loading: false,
-        error: null,
-      });
-    } catch (error) {
-      setState(prev => ({
-        ...prev,
-        loading: false,
-        error: error instanceof Error ? error.message : 'Failed to fetch profile',
-      }));
-    }
-  };
 
   const signIn = async (email: string, password: string) => {
     try {
       setState(prev => ({ ...prev, loading: true, error: null }));
-      const { error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) {
-        setState(prev => ({ ...prev, loading: false, error: error.message }));
-        return { error: error.message };
+
+      const result = await authApi.login(email, password);
+
+      if (!result.success || !result.data) {
+        setState(prev => ({
+          ...prev,
+          loading: false,
+          error: result.message || 'Login failed',
+        }));
+        return { error: result.message || 'Login failed' };
       }
+
+      const { user, token } = result.data;
+      const profile = mapUserToProfile(user);
+
+      setState({
+        user,
+        profile,
+        doctorProfile: null,
+        patientProfile: null,
+        session: { access_token: token },
+        loading: false,
+        error: null,
+        isAuthenticated: true,
+      });
+
       return { error: null };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Sign in failed';
@@ -151,40 +213,35 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       setState(prev => ({ ...prev, loading: true, error: null }));
 
-      const { data: authData, error: authError } = await supabase.auth.signUp({
+      const result = await authApi.register({
         email,
         password,
-        options: {
-          data: { full_name: fullName, role },
-        },
+        fullName,
+        role,
       });
 
-      if (authError) {
-        setState(prev => ({ ...prev, loading: false, error: authError.message }));
-        return { error: authError.message };
+      if (!result.success || !result.data) {
+        setState(prev => ({
+          ...prev,
+          loading: false,
+          error: result.message || 'Registration failed',
+        }));
+        return { error: result.message || 'Registration failed' };
       }
 
-      if (authData.user) {
-        const { error: profileError } = await supabase.from('profiles').insert({
-          id: authData.user.id,
-          email,
-          full_name: fullName,
-          role,
-        });
+      const { user, token } = result.data;
+      const profile = mapUserToProfile(user);
 
-        if (profileError) {
-          setState(prev => ({ ...prev, loading: false, error: profileError.message }));
-          return { error: profileError.message };
-        }
-
-        if (role === 'patient') {
-          await supabase.from('patients').insert({
-            profile_id: authData.user.id,
-            allergies: [],
-            chronic_conditions: [],
-          });
-        }
-      }
+      setState({
+        user,
+        profile,
+        doctorProfile: null,
+        patientProfile: null,
+        session: { access_token: token },
+        loading: false,
+        error: null,
+        isAuthenticated: true,
+      });
 
       return { error: null };
     } catch (error) {
@@ -195,39 +252,83 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const signOut = async () => {
-    await supabase.auth.signOut();
-    setState({
-      user: null,
-      profile: null,
-      doctorProfile: null,
-      patientProfile: null,
-      session: null,
-      loading: false,
-      error: null,
-    });
+    try {
+      await authApi.logout();
+    } catch (error) {
+      console.error('Logout error:', error);
+    } finally {
+      tokenManager.clearAll();
+      setState({
+        user: null,
+        profile: null,
+        doctorProfile: null,
+        patientProfile: null,
+        session: null,
+        loading: false,
+        error: null,
+        isAuthenticated: false,
+      });
+    }
   };
 
   const updateProfile = async (updates: Partial<Profile>) => {
-    if (!state.user) return { error: 'Not authenticated' };
+    if (!state.user) {
+      return { error: 'Not authenticated' };
+    }
 
     try {
-      const { error } = await supabase
-        .from('profiles')
-        .update({ ...updates, updated_at: new Date().toISOString() })
-        .eq('id', state.user.id);
+      // Map profile fields to API fields
+      const apiUpdates: any = {};
+      if (updates.full_name) apiUpdates.fullName = updates.full_name;
+      if (updates.phone) apiUpdates.phone = updates.phone;
+      if (updates.date_of_birth) apiUpdates.dateOfBirth = updates.date_of_birth;
+      if (updates.gender) apiUpdates.gender = updates.gender;
+      if (updates.language) apiUpdates.language = updates.language;
+      if (updates.address || updates.city || updates.state || updates.pincode) {
+        apiUpdates.address = {
+          street: updates.address,
+          city: updates.city,
+          state: updates.state,
+          pincode: updates.pincode,
+          country: updates.country,
+        };
+      }
 
-      if (error) return { error: error.message };
+      const result = await authApi.updateProfile(apiUpdates);
 
-      await fetchUserProfile(state.user.id, state.session);
+      if (!result.success || !result.data) {
+        return { error: result.message || 'Update failed' };
+      }
+
+      const profile = mapUserToProfile(result.data);
+      setState(prev => ({
+        ...prev,
+        user: result.data,
+        profile,
+      }));
+
       return { error: null };
     } catch (error) {
-      return { error: error instanceof Error ? error.message : 'Update failed' };
+      const message = error instanceof Error ? error.message : 'Update failed';
+      return { error: message };
     }
   };
 
   const refreshProfile = async () => {
-    if (state.user) {
-      await fetchUserProfile(state.user.id, state.session);
+    if (!state.user) return;
+
+    try {
+      const result = await authApi.getCurrentUser();
+      if (result.success && result.data) {
+        const profile = mapUserToProfile(result.data);
+        setState(prev => ({
+          ...prev,
+          user: result.data,
+          profile,
+        }));
+      }
+    } catch (error) {
+      console.error('Refresh profile error:', error);
     }
   };
 

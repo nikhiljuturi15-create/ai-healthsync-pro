@@ -20,13 +20,13 @@ const SymptomCheckerPage = lazy(() => import('./pages/patient/SymptomCheckerPage
 
 // Protected Route wrapper
 function ProtectedRoute({ children, allowedRoles }: { children: React.ReactNode; allowedRoles?: string[] }) {
-  const { profile, loading } = useAuth();
+  const { profile, loading, isAuthenticated } = useAuth();
 
   if (loading) {
     return <LoadingScreen />;
   }
 
-  if (!profile) {
+  if (!isAuthenticated || !profile) {
     return <Navigate to="/login" replace />;
   }
 

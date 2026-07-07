@@ -7,7 +7,7 @@ import { Input } from '../../components/ui/Input';
 import { Select } from '../../components/ui/FormElements';
 import { useAuth } from '../../contexts/AuthContext';
 import { useLanguage } from '../../contexts/LanguageContext';
-import type { UserRole } from '../../lib/supabase';
+import type { UserRole } from '../../contexts/AuthContext';
 
 export function LoginPage() {
   const [email, setEmail] = useState('');
@@ -30,8 +30,16 @@ export function LoginPage() {
       setError(error);
       setLoading(false);
     } else {
-      // Redirect based on role will be handled by auth state change
-      setTimeout(() => navigate('/'), 100);
+      // Small delay to ensure auth state is updated
+      setTimeout(() => {
+        // Get the user role from localStorage
+        const storedUser = localStorage.getItem('healthsync_user');
+        const user = storedUser ? JSON.parse(storedUser) : null;
+        const role = user?.role || 'patient';
+
+        // Redirect to appropriate dashboard
+        navigate(`/${role}`, { replace: true });
+      }, 100);
     }
   };
 
@@ -210,6 +218,7 @@ export function SignupPage() {
   const [success, setSuccess] = useState(false);
   const { signUp } = useAuth();
   const { t } = useLanguage();
+  const navigate = useNavigate();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -232,7 +241,10 @@ export function SignupPage() {
       setError(error);
       setLoading(false);
     } else {
-      setSuccess(true);
+      // Navigate to appropriate dashboard
+      setTimeout(() => {
+        navigate(`/${role}`, { replace: true });
+      }, 100);
     }
   };
 
